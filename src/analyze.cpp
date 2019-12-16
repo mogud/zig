@@ -1097,11 +1097,28 @@ ZigType *get_partial_container_type(CodeGen *g, Scope *scope, ContainerKind kind
 ZigValue *analyze_const_value(CodeGen *g, Scope *scope, AstNode *node, ZigType *type_entry,
         Buf *type_name, UndefAllowed undef)
 {
+    Error err;
+
+    ZigValue *result = create_const_vals(1);
+    ZigValue *result_ptr = create_const_vals(1);
+    result->special = ConstValSpecialUndef;
+    result->type = type_entry;
+    result_ptr->special = ConstValSpecialStatic;
+    result_ptr->type = get_pointer_to_type(g, type_entry, false);
+    result_ptr->data.x_ptr.mut = ConstPtrMutComptimeVar;
+    result_ptr->data.x_ptr.special = ConstPtrSpecialRef;
+    result_ptr->data.x_ptr.data.ref.pointee = result;
+
     size_t backward_branch_count = 0;
     size_t backward_branch_quota = default_backward_branch_quota;
-    return ir_eval_const_value(g, scope, node, type_entry,
+    if ((err = ir_eval_const_value(g, scope, node, result_ptr,
             &backward_branch_count, &backward_branch_quota,
-            nullptr, nullptr, node, type_name, nullptr, nullptr, undef);
+            nullptr, nullptr, node, type_name, nullptr, nullptr, undef)))
+    {
+        return g->invalid_instruction->value;
+    }
+    destroy(result_ptr, "ZigValue");
+    return result;
 }
 
 Error type_val_resolve_zero_bits(CodeGen *g, ZigValue *type_val, ZigType *parent_type,
@@ -3754,7 +3771,6 @@ ZigVar *add_variable(CodeGen *g, AstNode *source_node, Scope *parent_scope, Buf 
     variable_entry->var_type = var_type;
     variable_entry->parent_scope = parent_scope;
     variable_entry->shadowable = false;
-    variable_entry->mem_slot_index = SIZE_MAX;
     variable_entry->src_arg_index = SIZE_MAX;
 
     assert(name);
@@ -4644,7 +4660,7 @@ static void analyze_fn_ir(CodeGen *g, ZigFn *fn, AstNode *return_type_node) {
     FnTypeId *fn_type_id = &fn_type->data.fn.fn_type_id;
 
     ZigType *block_return_type = ir_analyze(g, fn->ir_executable,
-            &fn->analyzed_executable, fn_type_id->return_type, return_type_node);
+            &fn->analyzed_executable, fn_type_id->return_type, return_type_node, nullptr);
     fn->src_implicit_return_type = block_return_type;
 
     if (type_is_invalid(block_return_type) || fn->analyzed_executable.first_err_trace_msg != nullptr) {
@@ -6776,6 +6792,7 @@ static void render_const_val_array(CodeGen *g, Buf *buf, Buf *type_name, ZigValu
         }
         case ConstArraySpecialNone: {
             ZigValue *base = &array->data.s_none.elements[start];
+            assert(base != nullptr);
             assert(start + len <= const_val->type->data.array.len);
 
             buf_appendf(buf, "%s{", buf_ptr(type_name));
@@ -6791,6 +6808,10 @@ static void render_const_val_array(CodeGen *g, Buf *buf, Buf *type_name, ZigValu
 }
 
 void render_const_value(CodeGen *g, Buf *buf, ZigValue *const_val) {
+    if (const_val == nullptr) {
+        buf_appendf(buf, "(invalid nullptr value)");
+        return;
+    }
     switch (const_val->special) {
         case ConstValSpecialRuntime:
             buf_appendf(buf, "(runtime value)");
